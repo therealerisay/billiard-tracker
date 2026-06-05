@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""
+CueScore Live Match Tracker
+Monitoruje turniej bilardowy i wysyła powiadomienia macOS gdy zmienia się wynik śledzionego zespołu.
+"""
+
+import json
+import time
+import urllib.request
+import subprocess
+import re
+import sys
+import os
+import threading
+from datetime import datetime
+
+# ─── KONFIGURACJA ──────────────────────────────────────────────────────────────
+DEFAULT_TOURNAMENT_URL = "https://cuescore.com/tournament/MIX+CUP+-+SCOTCH+DOUBLES+-+Baltic+Billiard+Festival/82140400"
+POLL_INTERVAL = 15  # sekundy między odpytaniami API
+STATE_FILE = os.path.join(os.path.dirname(__file__), ".tracker_state.json")
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), "tracker_config.json")
+# ───────────────────────────────────────────────────────────────────────────────
+
+
+def extract_tournament_id(url: str) -> str:
+    """Wyciąga ID turnieju z URL CueScore."""
+    match = re.search(r"/(\d{6,})/?$", url.strip())
+    return match.group(1) if match else None
+
+
+def fetch_tournament(tournament_id: str) -> dict:
+    """Pobiera dane turnieju z API CueScore."""
+    api_url = f"https://api.cuescore.com/tournament/?id={tournament_id}"
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "BilliardTracker/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        print(f"[błąd API] {e}")
+        return None
+
+
+NTFY_URL = "https://ntfy.sh/bilard-tracker-wiktoria"
+
+
+ON_MAC = sys.platform == "darwin"
+
+
+def notify(title: str, message: str, sound: bool = True):
+    """Wysyła powiadomienie macOS (jeśli działa lokalnie) i na iPhone przez ntfy.sh."""
+    if ON_MAC:
+        sound_part = 'sound name "Glass"' if sound else ""
+        script = f'display notification "{message}" with title "{title}" {sound_part}'
+        subprocess.run(["osascript", "-e", script], capture_output=True)
+
+    try:
+        data = json.dumps({"title": title, "message": message, "priority": 4}).encode()
+        req = urllib.request.Request(
+            NTFY_URL,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        print(f"[ntfy błąd] {e}")
+
+    print(f"\n🔔 POWIADOMIENIE: {title}\n   {message}\n")
+
+
+def find_team_matches(data: dict, team_name: str) -> list[dict]:
+    """Zwraca wszystkie mecze, w których uczestniczy szukany zespół (case-insensitive)."""
+    team_lower = team_name.lower()
+    return [
+        m for m in data.get("matches", [])
+        if team_lower in (m.get("playerA", {}).get("name", "") or "").lower()
+        or team_lower in (m.get("playerB", {}).get("name", "") or "").lower()
+    ]
+
+
+def match_summary(match: dict, team_name: str) -> str:
+    """Zwraca czytelny opis wyniku meczu."""
+    a = match.get("playerA", {}).get("name", "?")
+    b = match.get("playerB", {}).get("name", "?")
+    sa = match.get("scoreA", 0)
+    sb = match.get("scoreB", 0)
+    race = match.get("raceTo", "?")
+    status = match.get("matchstatus", "")
+    round_name = match.get("roundName", "")
+
+    team_lower = team_name.lower()
+    is_a = team_lower in a.lower()
+
+    my_score = sa if is_a else sb
+    opp_score = sb if is_a else sa
+    opponent = b if is_a else a
+
+    if status == "finished":
+        won = (is_a and sa > sb) or (not is_a and sb > sa)
+        result = "wygrał" if won else "przegrał"
+        return f"{round_name}: {team_name} {result} z {opponent} {my_score}:{opp_score} (Race to {race})"
+    elif status == "playing":
+        return f"{round_name}: {team_name} vs {opponent} — {my_score}:{opp_score} 🎱 (w trakcie)"
+    else:
+        return f"{round_name}: {team_name} vs {opponent} — oczekuje"
+
+
+def determine_advancement(match: dict, team_name: str, tournament_data: dict) -> str:
+    """
+    Analizuje co oznacza wynik meczu dla śledzionego zespołu.
+    Zwraca None jeśli nic ważnego do zgłoszenia.
+    """
+    status = match.get("matchstatus", "")
+    if status != "finished":
+        return None
+
+    a = match.get("playerA", {}).get("name", "")
+    b = match.get("playerB", {}).get("name", "")
+    sa = match.get("scoreA", 0)
+    sb = match.get("scoreB", 0)
+    team_lower = team_name.lower()
+    is_a = team_lower in a.lower()
+    won = (is_a and sa > sb) or (not is_a and sb > sa)
+
+    round_name = match.get("roundName", "").lower()
+    winner_next = match.get("winnerNext")
+    loser_next = match.get("loserNext")
+
+    # Oceń kontekst rundy
+    advancement = ""
+    if "final" in round_name or "finale" in round_name:
+        if won:
+            return "MISTRZ TURNIEJU! 🏆 Twój zespół wygrał finał!"
+        else:
+            return "Finał przegrany — drugie miejsce 🥈"
+
+    if "semi" in round_name or "półfinał" in round_name:
+        if won:
+            advancement = "AWANS DO FINAŁU! 🎯"
+        else:
+            advancement = "Odpadł z półfinału — walka o 3. miejsce" if loser_next else "Odpadł z turnieju"
+
+    elif "quarter" in round_name or "ćwierćfinał" in round_name:
+        if won:
+            advancement = "AWANS DO PÓŁFINAŁU! ✅"
+        else:
+            advancement = "Odpadł z ćwierćfinału" if not loser_next else "Przechodzi do drabinki przegranych"
+
+    elif "loser" in round_name or "przegranych" in round_name:
+        if won:
+            advancement = "Wygrana w drabince przegranych — gra dalej! ✅"
+        else:
+            advancement = "ELIMINACJA z turnieju ❌"
+
+    elif "winner" in round_name or "wygranych" in round_name:
+        if won:
+            advancement = "Wygrana w drabince wygranych — awans! ✅"
+        else:
+            advancement = "Przegrana — spada do drabinki przegranych ⬇️"
+
+    else:
+        if won:
+            next_info = f" (mecz #{winner_next})" if winner_next else ""
+            advancement = f"Wygrana — przechodzi dalej{next_info} ✅"
+        else:
+            if loser_next:
+                advancement = "Przegrana — przechodzi do drabinki przegranych ⬇️"
+            else:
+                advancement = "ELIMINACJA z turnieju ❌"
+
+    return advancement if advancement else None
+
+
+def load_state() -> dict:
+    """Wczytuje stan poprzedniej sesji z pliku."""
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state: dict):
+    """Zapisuje bieżący stan do pliku."""
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def print_team_status(matches: list[dict], team_name: str):
+    """Wyświetla aktualny status wszystkich meczów zespołu."""
+    if not matches:
+        print(f"  Brak meczów dla zespołu '{team_name}'")
+        return
+    for m in matches:
+        status = m.get("matchstatus", "unknown")
+        icon = {"finished": "✅", "playing": "🎱", "scheduled": "⏳"}.get(status, "❓")
+        print(f"  {icon} {match_summary(m, team_name)}")
+
+
+def process_team(match: dict, team_name: str, known: dict, data: dict):
+    """Sprawdza zmiany dla jednego meczu jednego zespołu i wysyła powiadomienia."""
+    mid = str(match.get("matchId"))
+    cur_sa = match.get("scoreA", 0)
+    cur_sb = match.get("scoreB", 0)
+    cur_status = match.get("matchstatus", "")
+
+    prev = known.get(mid, {})
+    prev_sa = prev.get("scoreA", -1)
+    prev_sb = prev.get("scoreB", -1)
+    prev_status = prev.get("status", "")
+
+    if cur_status == "playing" and prev_status != "playing":
+        a = match.get("playerA", {}).get("name", "?")
+        b = match.get("playerB", {}).get("name", "?")
+        notify(f"🎱 Mecz się zaczął! [{team_name}]", f"{a} vs {b} — {match.get('roundName', '')}")
+
+    elif cur_status == "playing" and (cur_sa != prev_sa or cur_sb != prev_sb):
+        notify(f"[{team_name}] Zmiana wyniku! {cur_sa}:{cur_sb}", match_summary(match, team_name))
+
+    if cur_status == "finished" and prev_status != "finished":
+        summary = match_summary(match, team_name)
+        advancement = determine_advancement(match, team_name, data)
+        notify(f"[{team_name}] Mecz zakończony!", summary)
+        if advancement:
+            time.sleep(1)
+            notify(f"[{team_name}] Co to oznacza:", advancement)
+
+    known[mid] = {"scoreA": cur_sa, "scoreB": cur_sb, "status": cur_status}
+
+
+def run_tracker(tournament_url: str, team_names: list[str]):
+    """Główna pętla śledzenia wielu zespołów."""
+    tournament_id = extract_tournament_id(tournament_url)
+    if not tournament_id:
+        print(f"❌ Nie można wyciągnąć ID turnieju z URL: {tournament_url}")
+        return
+
+    teams_str = ", ".join(team_names)
+    print(f"\n{'='*60}")
+    print(f"  CueScore Live Tracker")
+    print(f"{'='*60}")
+    print(f"  Turniej ID : {tournament_id}")
+    print(f"  Śledzone   : {teams_str}")
+    print(f"  Odświeżanie: co {POLL_INTERVAL}s")
+    print(f"  Wyjście    : Ctrl+C")
+    print(f"{'='*60}\n")
+
+    full_state = load_state()
+    # Osobny słownik stanu dla każdego zespołu
+    known_per_team = {
+        name: full_state.get(f"{tournament_id}_{name}", {}) for name in team_names
+    }
+
+    notify(
+        "Tracker uruchomiony 🎱",
+        f"Śledzę: {teams_str} | Turniej #{tournament_id}",
+        sound=False,
+    )
+
+    while True:
+        data = fetch_tournament(tournament_id)
+        now = datetime.now().strftime("%H:%M:%S")
+
+        if data is None:
+            print(f"[{now}] Nie udało się pobrać danych, retry za {POLL_INTERVAL}s...")
+            time.sleep(POLL_INTERVAL)
+            continue
+
+        for team_name in team_names:
+            matches = find_team_matches(data, team_name)
+            if not matches:
+                print(f"[{now}] Brak meczów dla '{team_name}'")
+            else:
+                print(f"[{now}] {team_name}:")
+                print_team_status(matches, team_name)
+                for match in matches:
+                    process_team(match, team_name, known_per_team[team_name], data)
+
+            full_state[f"{tournament_id}_{team_name}"] = known_per_team[team_name]
+
+        save_state(full_state)
+        time.sleep(POLL_INTERVAL)
+
+
+def interactive_setup():
+    """Interaktywny tryb konfiguracji."""
+    print("\n╔══════════════════════════════════════════════╗")
+    print("║       CueScore Live Tracker 🎱               ║")
+    print("╚══════════════════════════════════════════════╝\n")
+
+    print(f"Domyślny URL: {DEFAULT_TOURNAMENT_URL}")
+    url_input = input("Wklej link do turnieju (Enter = użyj domyślnego): ").strip()
+    url = url_input if url_input else DEFAULT_TOURNAMENT_URL
+
+    tid = extract_tournament_id(url)
+    if not tid:
+        print("❌ Nie rozpoznaję formatu URL CueScore.")
+        sys.exit(1)
+
+    print(f"\nPobieram dane turnieju {tid}...")
+    data = fetch_tournament(tid)
+    if not data:
+        print("❌ Nie udało się pobrać danych turnieju.")
+        sys.exit(1)
+
+    print(f"✅ Turniej: {data.get('name', '?')}\n")
+
+    # Pokaż wszystkie zespoły
+    teams = set()
+    for m in data.get("matches", []):
+        if name := (m.get("playerA") or {}).get("name"):
+            teams.add(name)
+        if name := (m.get("playerB") or {}).get("name"):
+            teams.add(name)
+
+    if teams:
+        print("Dostępne zespoły:")
+        for i, t in enumerate(sorted(teams), 1):
+            print(f"  {i:2}. {t}")
+
+    team_names = []
+    while True:
+        prompt = "Wpisz nazwę zespołu (lub część nazwy): " if not team_names else "Dodaj kolejny zespół (Enter = gotowe): "
+        print()
+        team_name = input(prompt).strip()
+
+        if not team_name:
+            if not team_names:
+                print("❌ Musisz podać co najmniej jeden zespół.")
+                continue
+            break
+
+        test_matches = find_team_matches(data, team_name)
+        if not test_matches:
+            print(f"⚠️  Nie znaleziono meczów dla '{team_name}'. Sprawdź pisownię.")
+            cont = input("Dodać mimo to? (t/n): ").strip().lower()
+            if cont != "t":
+                continue
+        else:
+            print(f"✅ '{team_name}' — znaleziono {len(test_matches)} mecz(e):")
+            print_team_status(test_matches, team_name)
+
+        team_names.append(team_name)
+
+        if len(team_names) >= 10:
+            print("(osiągnięto limit 10 zespołów)")
+            break
+
+    print()
+    run_tracker(url, team_names)
+
+
+def load_config() -> dict:
+    """Wczytuje tracker_config.json jeśli istnieje."""
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def main():
+    # Tryb 1: argumenty z wiersza poleceń
+    if len(sys.argv) >= 3:
+        run_tracker(sys.argv[1], sys.argv[2:])
+        return
+    if len(sys.argv) == 2:
+        tid = extract_tournament_id(sys.argv[1])
+        if tid:
+            team = input("Wpisz nazwę swojego zespołu: ").strip()
+            run_tracker(sys.argv[1], [team])
+        else:
+            print("❌ Nieprawidłowy URL")
+            sys.exit(1)
+        return
+
+    # Tryb 2: automatyczny — czyta tracker_config.json
+    config = load_config()
+    if config:
+        tournaments = config.get("tournaments", [])
+
+        # stary format (jeden turniej) — konwertuj w locie
+        if not tournaments and config.get("tournament_url"):
+            tournaments = [{"url": config["tournament_url"], "teams": config.get("teams", [])}]
+
+        valid = [(t["url"], t["teams"]) for t in tournaments if t.get("url") and t.get("teams")]
+
+        if valid:
+            print(f"📋 Wczytuję konfigurację z tracker_config.json ({len(valid)} turniej/e)")
+            for url, teams in valid:
+                tid = extract_tournament_id(url)
+                print(f"   #{tid}: {', '.join(teams)}")
+
+            if len(valid) == 1:
+                run_tracker(valid[0][0], valid[0][1])
+            else:
+                # Każdy turniej w osobnym wątku
+                threads = []
+                for url, teams in valid:
+                    t = threading.Thread(target=run_tracker, args=(url, teams), daemon=True)
+                    t.start()
+                    threads.append(t)
+                for t in threads:
+                    t.join()
+            return
+        else:
+            print("⚠️  tracker_config.json niekompletny — przechodzę do trybu interaktywnego")
+
+    # Tryb 3: interaktywny
+    interactive_setup()
+
+
+if __name__ == "__main__":
+    main()
