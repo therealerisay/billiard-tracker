@@ -54,11 +54,14 @@ def notify(title: str, message: str, sound: bool = True):
         subprocess.run(["osascript", "-e", script], capture_output=True)
 
     try:
-        data = json.dumps({"title": title, "message": message, "priority": 4}).encode()
         req = urllib.request.Request(
             NTFY_URL,
-            data=data,
-            headers={"Content-Type": "application/json"},
+            data=message.encode("utf-8"),
+            headers={
+                "Title": title.encode("utf-8"),
+                "Priority": "4",
+                "Tags": "billiards",
+            },
             method="POST",
         )
         urllib.request.urlopen(req, timeout=5)
@@ -159,6 +162,17 @@ def determine_advancement(match: dict, team_name: str, tournament_data: dict) ->
             advancement = "Przegrana — spada do drabinki przegranych ⬇️"
 
     else:
+        # Jeśli ani winnerNext ani loserNext nie są ustawione i nazwa rundy
+        # wygląda jak runda grupowa (Round 1/2/3...) — nie wysyłaj ELIMINACJI,
+        # bo to może być mecz fazy grupowej, a nie pucharowej.
+        is_group_stage = (
+            winner_next is None
+            and loser_next is None
+            and re.search(r"round\s*\d+|grupa|group", round_name)
+        )
+        if is_group_stage:
+            return None
+
         if won:
             next_info = f" (mecz #{winner_next})" if winner_next else ""
             advancement = f"Wygrana — przechodzi dalej{next_info} ✅"
