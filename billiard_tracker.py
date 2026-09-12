@@ -284,6 +284,16 @@ def process_team(match: dict, team_name: str, known: dict, data: dict, all_track
         result = "wygrał ✅" if won else "przegrał ❌"
         advancement = determine_advancement(match, team_name, data)
         stats = player_stats(data, team_name)
+        # Jeśli advancement to ELIMINACJA — nie wysyłaj od razu, zapisz do poczekalni
+        if advancement and "ELIMINACJA" in advancement:
+            known["_pending_elim"] = {
+                "matchId": mid, "opponent": opponent,
+                "score": f"{my_score}:{opp_score}", "round": round_name,
+                "stats": stats, "heart": heart,
+            }
+            advancement = None  # wyślemy dopiero w następnym cyklu
+        else:
+            known.pop("_pending_elim", None)
         notify(
             f"[{round_name}] {team_name} {result}{heart}",
             f"{my_score}:{opp_score} vs {opponent} | {stats}" + (f"\n{advancement}" if advancement else ""),
@@ -331,6 +341,21 @@ def run_tracker(tournament_url: str, team_names: list[str]):
             continue
 
         for team_name in team_names:
+            known = known_per_team[team_name]
+
+            # Sprawdź poczekalnię eliminacji z poprzedniego cyklu
+            pending = known.get("_pending_elim")
+            if pending and not has_future_match(data, team_name):
+                notify(
+                    f"[{pending['round']}] ELIMINACJA z turnieju ❌{pending['heart']}",
+                    f"{pending['score']} vs {pending['opponent']} | {pending['stats']}",
+                )
+                known.pop("_pending_elim", None)
+            elif pending and has_future_match(data, team_name):
+                # Ma już kolejny mecz — fałszywy alarm, czyścimy
+                print(f"[{now}] {team_name}: anulowano fałszywą eliminację (ma kolejny mecz)")
+                known.pop("_pending_elim", None)
+
             matches = find_team_matches(data, team_name)
             if not matches:
                 print(f"[{now}] Brak meczów dla '{team_name}'")
@@ -338,9 +363,9 @@ def run_tracker(tournament_url: str, team_names: list[str]):
                 print(f"[{now}] {team_name}:")
                 print_team_status(matches, team_name)
                 for match in matches:
-                    process_team(match, team_name, known_per_team[team_name], data, team_names)
+                    process_team(match, team_name, known, data, team_names)
 
-            full_state[f"{tournament_id}_{team_name}"] = known_per_team[team_name]
+            full_state[f"{tournament_id}_{team_name}"] = known
 
         save_state(full_state)
         time.sleep(POLL_INTERVAL)
