@@ -1,14 +1,6 @@
 {
   "tournaments": [
     {
-      "url": "https://cuescore.com/tournament/%C5%9Awie%C5%BCak+Challenge+III+-+turniej+dla+pocz%C4%85tkuj%C4%85cych+-+2%252F16/82317250",
-      "teams": ["Wiktoria Kolinko", "Paweł Koryś"]
-    },
-    {
-      "url": "https://cuescore.com/tournament/Grand+Prix+of+Poland+PREDATOR+POL+TOUR+-+Baltic+Billiard+Festival/82140409",
-      "teams": ["Dominik Wojciechowski", "Piotr Mierzejewski"]
-    }
-    ,{
       "url": "https://cuescore.com/tournament/Turniej+Strefa+OPEN+12.09.2026+4+urodziny/87226051",
       "teams": ["Piotr Mierzejewski", "Dominik Wojciechowski", "Maciej Trudnowski", "Piotr Żejmo", "Wadim Papiż"]
     }
