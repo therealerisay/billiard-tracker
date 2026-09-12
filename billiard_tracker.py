@@ -216,12 +216,34 @@ def print_team_status(matches: list[dict], team_name: str):
         print(f"  {icon} {match_summary(m, team_name)}")
 
 
-def process_team(match: dict, team_name: str, known: dict, data: dict):
+def player_stats(data: dict, team_name: str) -> str:
+    """Zwraca statystyki W/L gracza w turnieju (np. '3W 1L')."""
+    wins = losses = 0
+    team_lower = team_name.lower()
+    for m in data.get("matches", []):
+        if m.get("matchstatus") != "finished":
+            continue
+        a = (m.get("playerA", {}).get("name", "") or "").lower()
+        b = (m.get("playerB", {}).get("name", "") or "").lower()
+        if team_lower not in a and team_lower not in b:
+            continue
+        sa, sb = m.get("scoreA", 0), m.get("scoreB", 0)
+        is_a = team_lower in a
+        won = (is_a and sa > sb) or (not is_a and sb > sa)
+        if won:
+            wins += 1
+        else:
+            losses += 1
+    return f"{wins}W {losses}L"
+
+
+def process_team(match: dict, team_name: str, known: dict, data: dict, all_tracked: list):
     """Sprawdza zmiany dla jednego meczu jednego zespołu i wysyła powiadomienia."""
     mid = str(match.get("matchId"))
     cur_sa = match.get("scoreA", 0)
     cur_sb = match.get("scoreB", 0)
     cur_status = match.get("matchstatus", "")
+    race_to = match.get("raceTo", 0)
 
     prev = known.get(mid, {})
     prev_sa = prev.get("scoreA", -1)
@@ -234,25 +256,45 @@ def process_team(match: dict, team_name: str, known: dict, data: dict):
     my_score = cur_sa if is_a else cur_sb
     opp_score = cur_sb if is_a else cur_sa
 
+    # Czy przeciwnik też jest śledzony?
+    opp_tracked = any(t.lower() in opponent.lower() for t in all_tracked if t != team_name)
+    heart = " 💙" if opp_tracked else ""
+
+    # Ostatnia piłka: oboje mają race_to-1
+    last_ball = (race_to > 0 and my_score == race_to - 1 and opp_score == race_to - 1)
+    last_ball_tag = " 🔥 OSTATNIA PIŁKA!" if last_ball else ""
+
     if cur_status == "playing" and prev_status != "playing":
+        stats = player_stats(data, team_name)
         notify(
-            f"🎱 [{round_name}] Mecz się zaczął!",
-            f"{team_name} vs {opponent}",
+            f"🎱 [{round_name}] Mecz się zaczął!{heart}",
+            f"{team_name} ({stats}) vs {opponent}",
         )
 
     elif cur_status == "playing" and (cur_sa != prev_sa or cur_sb != prev_sb):
-        notify(
-            f"🎱 [{round_name}] {team_name}: {my_score}:{opp_score}",
-            f"vs {opponent}",
-        )
+        prev_my = prev_sa if is_a else prev_sb
+        prev_opp = prev_sb if is_a else prev_sa
+        prev_last_ball = (race_to > 0 and prev_my == race_to - 1 and prev_opp == race_to - 1)
+        # Wyślij "ostatnia piłka" tylko raz — gdy właśnie osiągnęliśmy ten stan
+        if last_ball and not prev_last_ball:
+            notify(
+                f"⚡ [{round_name}] {my_score}:{opp_score}{last_ball_tag}",
+                f"{team_name} vs {opponent}{heart}",
+            )
+        else:
+            notify(
+                f"🎱 [{round_name}] {team_name}: {my_score}:{opp_score}",
+                f"vs {opponent}{heart}",
+            )
 
     if cur_status == "finished" and prev_status != "finished":
         won = (is_a and cur_sa > cur_sb) or (not is_a and cur_sb > cur_sa)
         result = "wygrał ✅" if won else "przegrał ❌"
         advancement = determine_advancement(match, team_name, data)
+        stats = player_stats(data, team_name)
         notify(
-            f"[{round_name}] {team_name} {result}",
-            f"{my_score}:{opp_score} vs {opponent}" + (f"\n{advancement}" if advancement else ""),
+            f"[{round_name}] {team_name} {result}{heart}",
+            f"{my_score}:{opp_score} vs {opponent} | {stats}" + (f"\n{advancement}" if advancement else ""),
         )
 
     known[mid] = {"scoreA": cur_sa, "scoreB": cur_sb, "status": cur_status}
@@ -304,7 +346,7 @@ def run_tracker(tournament_url: str, team_names: list[str]):
                 print(f"[{now}] {team_name}:")
                 print_team_status(matches, team_name)
                 for match in matches:
-                    process_team(match, team_name, known_per_team[team_name], data)
+                    process_team(match, team_name, known_per_team[team_name], data, team_names)
 
             full_state[f"{tournament_id}_{team_name}"] = known_per_team[team_name]
 
