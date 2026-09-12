@@ -113,6 +113,19 @@ def match_summary(match: dict, team_name: str) -> str:
         return f"{round_name}: {team_name} vs {opponent} — oczekuje"
 
 
+def has_future_match(tournament_data: dict, team_name: str) -> bool:
+    """Sprawdza czy gracz ma jeszcze jakiś mecz scheduled/playing w turnieju."""
+    team_lower = team_name.lower()
+    for m in tournament_data.get("matches", []):
+        if m.get("matchstatus") in ("finished",):
+            continue
+        a = (m.get("playerA", {}).get("name", "") or "").lower()
+        b = (m.get("playerB", {}).get("name", "") or "").lower()
+        if team_lower in a or team_lower in b:
+            return True
+    return False
+
+
 def determine_advancement(match: dict, team_name: str, tournament_data: dict) -> str:
     """
     Analizuje co oznacza wynik meczu dla śledzionego zespołu.
@@ -131,63 +144,42 @@ def determine_advancement(match: dict, team_name: str, tournament_data: dict) ->
     won = (is_a and sa > sb) or (not is_a and sb > sa)
 
     round_name = match.get("roundName", "").lower()
-    winner_next = match.get("winnerNext")
-    loser_next = match.get("loserNext")
 
-    # Oceń kontekst rundy
-    advancement = ""
+    # Finał — obsługujemy zawsze natychmiast
     if "final" in round_name or "finale" in round_name:
         if won:
-            return "MISTRZ TURNIEJU! 🏆 Twój zespół wygrał finał!"
+            return "MISTRZ TURNIEJU! 🏆"
         else:
             return "Finał przegrany — drugie miejsce 🥈"
 
     if "semi" in round_name or "półfinał" in round_name:
         if won:
-            advancement = "AWANS DO FINAŁU! 🎯"
-        else:
-            advancement = "Odpadł z półfinału — walka o 3. miejsce" if loser_next else "Odpadł z turnieju"
+            return "AWANS DO FINAŁU! 🎯"
 
-    elif "quarter" in round_name or "ćwierćfinał" in round_name:
+    if "quarter" in round_name or "ćwierćfinał" in round_name:
         if won:
-            advancement = "AWANS DO PÓŁFINAŁU! ✅"
-        else:
-            advancement = "Odpadł z ćwierćfinału" if not loser_next else "Przechodzi do drabinki przegranych"
+            return "AWANS DO PÓŁFINAŁU! ✅"
 
-    elif "loser" in round_name or "przegranych" in round_name:
-        if won:
-            advancement = "Wygrana w drabince przegranych — gra dalej! ✅"
-        else:
-            advancement = "ELIMINACJA z turnieju ❌"
+    if won:
+        if "winner" in round_name or "wygranych" in round_name:
+            return "Wygrana w drabince wygranych ✅"
+        if "loser" in round_name or "przegranych" in round_name:
+            return "Wygrana w drabince przegranych — gra dalej! ✅"
+        return None  # Wygrana w grupie — bez komentarza
 
-    elif "winner" in round_name or "wygranych" in round_name:
-        if won:
-            advancement = "Wygrana w drabince wygranych — awans! ✅"
-        else:
-            advancement = "Przegrana — spada do drabinki przegranych ⬇️"
-
+    # Przegrana — sprawdzamy CueScore czy gracz ma jeszcze mecz
+    # (czekamy aż bracket się zaktualizuje zanim powiemy "eliminacja")
+    if has_future_match(tournament_data, team_name):
+        if "winner" in round_name or "wygranych" in round_name:
+            return "Przegrana — spada do drabinki przegranych ⬇️"
+        return None  # Ma kolejny mecz — nie strasz eliminacją
     else:
-        # Jeśli ani winnerNext ani loserNext nie są ustawione i nazwa rundy
-        # wygląda jak runda grupowa (Round 1/2/3...) — nie wysyłaj ELIMINACJI,
-        # bo to może być mecz fazy grupowej, a nie pucharowej.
-        is_group_stage = (
-            winner_next is None
-            and loser_next is None
-            and re.search(r"round\s*\d+|grupa|group", round_name)
-        )
-        if is_group_stage:
-            return None
-
-        if won:
-            next_info = f" (mecz #{winner_next})" if winner_next else ""
-            advancement = f"Wygrana — przechodzi dalej{next_info} ✅"
-        else:
-            if loser_next:
-                advancement = "Przegrana — przechodzi do drabinki przegranych ⬇️"
-            else:
-                advancement = "ELIMINACJA z turnieju ❌"
-
-    return advancement if advancement else None
+        # Brak przyszłych meczów w danych CueScore = potwierdzona eliminacja
+        if "loser" in round_name or "przegranych" in round_name:
+            return "ELIMINACJA z turnieju ❌"
+        if re.search(r"round\s*\d+|grupa|group", round_name):
+            return None  # Przegrana w grupie bez przyszłych meczów — może jeszcze nie wygenerowano
+        return "ELIMINACJA z turnieju ❌"
 
 
 def load_state() -> dict:
