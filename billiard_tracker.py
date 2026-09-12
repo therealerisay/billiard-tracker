@@ -297,8 +297,8 @@ def process_team(match: dict, team_name: str, known: dict, data: dict, all_track
         else:
             known.pop("_pending_elim", None)
         notify(
-            f"[{round_name}] {team_name} {result}{heart}",
-            f"{my_score}:{opp_score} vs {opponent} | {stats}" + (f"\n{advancement}" if advancement else ""),
+            f"[{round_name}] {team_name} {result} ({stats}){heart}",
+            f"{my_score}:{opp_score} vs {opponent}" + (f" — {advancement}" if advancement else ""),
         )
 
     known[mid] = {"scoreA": cur_sa, "scoreB": cur_sb, "status": cur_status}
