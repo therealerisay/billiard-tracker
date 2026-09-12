@@ -285,13 +285,15 @@ def process_team(match: dict, team_name: str, known: dict, data: dict, all_track
         advancement = determine_advancement(match, team_name, data)
         stats = player_stats(data, team_name)
         # Jeśli advancement to ELIMINACJA — nie wysyłaj od razu, zapisz do poczekalni
+        # i poczekaj 2 minuty żeby CueScore zdążył zaktualizować drabinkę
         if advancement and "ELIMINACJA" in advancement:
             known["_pending_elim"] = {
                 "matchId": mid, "opponent": opponent,
                 "score": f"{my_score}:{opp_score}", "round": round_name,
                 "stats": stats, "heart": heart,
+                "check_after": time.time() + 120,  # sprawdź za 2 minuty
             }
-            advancement = None  # wyślemy dopiero w następnym cyklu
+            advancement = None
         else:
             known.pop("_pending_elim", None)
         notify(
@@ -343,18 +345,23 @@ def run_tracker(tournament_url: str, team_names: list[str]):
         for team_name in team_names:
             known = known_per_team[team_name]
 
-            # Sprawdź poczekalnię eliminacji z poprzedniego cyklu
+            # Sprawdź poczekalnię eliminacji
             pending = known.get("_pending_elim")
-            if pending and not has_future_match(data, team_name):
-                notify(
-                    f"[{pending['round']}] ELIMINACJA z turnieju ❌{pending['heart']}",
-                    f"{pending['score']} vs {pending['opponent']} | {pending['stats']}",
-                )
-                known.pop("_pending_elim", None)
-            elif pending and has_future_match(data, team_name):
-                # Ma już kolejny mecz — fałszywy alarm, czyścimy
-                print(f"[{now}] {team_name}: anulowano fałszywą eliminację (ma kolejny mecz)")
-                known.pop("_pending_elim", None)
+            if pending:
+                if has_future_match(data, team_name):
+                    # Ma już kolejny mecz — fałszywy alarm, czyścimy
+                    print(f"[{now}] {team_name}: anulowano fałszywą eliminację (ma kolejny mecz)")
+                    known.pop("_pending_elim", None)
+                elif time.time() >= pending["check_after"]:
+                    # Minęły 2 minuty i nadal brak meczu — potwierdzamy eliminację
+                    notify(
+                        f"[{pending['round']}] ELIMINACJA z turnieju ❌{pending['heart']}",
+                        f"{pending['score']} vs {pending['opponent']} | {pending['stats']}",
+                    )
+                    known.pop("_pending_elim", None)
+                else:
+                    remaining = int(pending["check_after"] - time.time())
+                    print(f"[{now}] {team_name}: możliwa eliminacja, czekam jeszcze {remaining}s na aktualizację CueScore")
 
             matches = find_team_matches(data, team_name)
             if not matches:
