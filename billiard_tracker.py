@@ -50,8 +50,13 @@ def notify(title: str, message: str, sound: bool = True):
     """Wysyła powiadomienie macOS (jeśli działa lokalnie) i na iPhone przez ntfy.sh."""
     if ON_MAC:
         sound_part = 'sound name "Glass"' if sound else ""
-        script = f'display notification "{message}" with title "{title}" {sound_part}'
-        subprocess.run(["osascript", "-e", script], capture_output=True)
+        # Cudzysłowy w tekście mogą złamać osascript — escapujemy
+        safe_title = title.replace('"', '\\"')
+        safe_message = message.replace('"', '\\"')
+        script = f'display notification "{safe_message}" with title "{safe_title}" {sound_part}'
+        result = subprocess.run(["osascript", "-e", script], capture_output=True)
+        if result.returncode != 0:
+            print(f"[mac notify błąd] {result.stderr.decode()}")
 
     try:
         req = urllib.request.Request(
@@ -223,21 +228,32 @@ def process_team(match: dict, team_name: str, known: dict, data: dict):
     prev_sb = prev.get("scoreB", -1)
     prev_status = prev.get("status", "")
 
+    round_name = match.get("roundName", "")
+    is_a = team_name.lower() in (match.get("playerA", {}).get("name", "") or "").lower()
+    opponent = match.get("playerB", {}).get("name", "?") if is_a else match.get("playerA", {}).get("name", "?")
+    my_score = cur_sa if is_a else cur_sb
+    opp_score = cur_sb if is_a else cur_sa
+
     if cur_status == "playing" and prev_status != "playing":
-        a = match.get("playerA", {}).get("name", "?")
-        b = match.get("playerB", {}).get("name", "?")
-        notify(f"🎱 Mecz się zaczął! [{team_name}]", f"{a} vs {b} — {match.get('roundName', '')}")
+        notify(
+            f"🎱 [{round_name}] Mecz się zaczął!",
+            f"{team_name} vs {opponent}",
+        )
 
     elif cur_status == "playing" and (cur_sa != prev_sa or cur_sb != prev_sb):
-        notify(f"[{team_name}] Zmiana wyniku! {cur_sa}:{cur_sb}", match_summary(match, team_name))
+        notify(
+            f"🎱 [{round_name}] {team_name}: {my_score}:{opp_score}",
+            f"vs {opponent}",
+        )
 
     if cur_status == "finished" and prev_status != "finished":
-        summary = match_summary(match, team_name)
+        won = (is_a and cur_sa > cur_sb) or (not is_a and cur_sb > cur_sa)
+        result = "wygrał ✅" if won else "przegrał ❌"
         advancement = determine_advancement(match, team_name, data)
-        notify(f"[{team_name}] Mecz zakończony!", summary)
-        if advancement:
-            time.sleep(1)
-            notify(f"[{team_name}] Co to oznacza:", advancement)
+        notify(
+            f"[{round_name}] {team_name} {result}",
+            f"{my_score}:{opp_score} vs {opponent}" + (f"\n{advancement}" if advancement else ""),
+        )
 
     known[mid] = {"scoreA": cur_sa, "scoreB": cur_sb, "status": cur_status}
 
