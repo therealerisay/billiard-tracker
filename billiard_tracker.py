@@ -250,7 +250,7 @@ def process_team(match: dict, team_name: str, known: dict, data: dict, all_track
 
     # Czy przeciwnik też jest śledzony?
     opp_tracked = any(t.lower() in opponent.lower() for t in all_tracked if t != team_name)
-    heart = " 💙" if opp_tracked else ""
+    heart = " 💚" if opp_tracked else ""
 
     # Ostatnia piłka: oboje mają race_to-1
     last_ball = (race_to > 0 and my_score == race_to - 1 and opp_score == race_to - 1)
